@@ -35,8 +35,8 @@ def fetch_and_cache(url, fname):
     return data
 
 # USER PARAMETERS
-COUNTRY = "Austria"
-YEAR = 2025
+COUNTRY = "Hungary"
+YEAR = 2024
 SESSION_TYPE = "Practice"
 COMPOUNDS = ["SOFT", "MEDIUM", "HARD"] 
 ANOMALY_THRESHOLD = 74.0
@@ -47,12 +47,14 @@ SECONDS_SAVED_PER_LAP_FUEL = 0.045
 sessions_url = f"https://api.openf1.org/v1/sessions?country_name={COUNTRY}&session_type={SESSION_TYPE}&year={YEAR}"
 sessions = fetch_and_cache(sessions_url, f"sessions_{COUNTRY}_{SESSION_TYPE}_{YEAR}.json")
 practice_session_keys = [s["session_key"] for s in sessions[:3]]
+print(practice_session_keys)
 
 for COMPOUND in COMPOUNDS:
     rows = []
     for session in practice_session_keys:
         stints = fetch_and_cache(f"https://api.openf1.org/v1/stints?session_key={session}", f"stints_{session}.json")
         laps = fetch_and_cache(f"https://api.openf1.org/v1/laps?session_key={session}", f"laps_{session}.json")
+        print(stints[0])
 
         # store each lap
         laps_by_driver = defaultdict(dict)
@@ -135,7 +137,7 @@ for COMPOUND in COMPOUNDS:
     lap_times = np.array([r["lap_time"] for r in detailed])
     ages = np.array([r["tyre_age"] for r in detailed])
     fuel_zero = np.array([r["fuel_corrected_time_zero"] for r in detailed])
-
+    ANOMALY_THRESHOLD = min(lap_times)*1.15
     mask = (lap_times <= ANOMALY_THRESHOLD) & np.isfinite(lap_times)
     lap_times_clean = lap_times[mask]
     ages_clean = ages[mask]
@@ -161,10 +163,33 @@ for COMPOUND in COMPOUNDS:
     plt.savefig(os.path.join(PLOTS_DIR, f"{COMPOUND}_scatter_mean_raw.png"), dpi=300)
     plt.close()
 
-    # C: fuel corrected (zero baseline)
+    # fuel corrected (zero baseline)
+
+    # Data
+    x = np.array(unique_ages)
+    y = np.array(mean_times_fuel_zero)
+
+    # Avoid log(0) errors
+    y_safe = np.where(y <= 0, 1e-6, y)
+
+    # Log-linear fit
+    log_y = np.log(y_safe)
+    coeffs = np.polyfit(x, log_y, 1)   # linear fit: log(y) = b*x + log(a)
+    b = coeffs[0]
+    log_a = coeffs[1]
+    a = np.exp(log_a)
+
+    # Generate smooth curve
+    x_smooth = np.linspace(x.min(), x.max(), 200)
+    y_fit = a * np.exp(b * x_smooth)
+
+    # Plot
     plt.figure(figsize=(10,6))
     plt.scatter(ages_clean, fuel_zero_clean, alpha=0.4, s=10, label="Fuel-corrected (zero)")
-    plt.plot(unique_ages, mean_times_fuel_zero, linewidth=2, label="Mean per tyre age")
+    plt.plot(x, y, linewidth=2, label="Mean per tyre age")
+    plt.plot(x_smooth, y_fit, color="red", 
+            label=f"Exp fit: y = {a:.3f} e^({b:.3f}x)")
+
     plt.xlabel("Tyre age (laps)")
     plt.ylabel("Lap time (s)")
     plt.title(f"{COMPOUND} Lap Times vs Tyre Age (Fuel-corrected, Zero)")
@@ -173,5 +198,6 @@ for COMPOUND in COMPOUNDS:
     plt.tight_layout()
     plt.savefig(os.path.join(PLOTS_DIR, f"{COMPOUND}_scatter_mean_fuel_zero.png"), dpi=300)
     plt.close()
+
 
     print(f"Saved 4 plots for {COMPOUND}")
