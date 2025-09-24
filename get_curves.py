@@ -6,7 +6,8 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.linear_model import HuberRegressor
+from sklearn.linear_model import LinearRegression, RANSACRegressor, HuberRegressor
+from scipy.optimize import curve_fit
 
 # --- Setup cache and plots directories ---
 CACHE_DIR = "cache"
@@ -33,7 +34,7 @@ def fetch_and_cache(url, fname):
     return data
 
 # --- User parameters ---
-COUNTRY = "Hungary"
+COUNTRY = "Italy"
 YEAR = 2024
 SESSION_TYPE = "Practice"
 COMPOUNDS = ["SOFT", "MEDIUM", "HARD"] 
@@ -54,7 +55,7 @@ for COMPOUND in COMPOUNDS:
     for session in practice_session_keys:
         stints = fetch_and_cache(f"https://api.openf1.org/v1/stints?session_key={session}", f"stints_{session}.json")
         laps = fetch_and_cache(f"https://api.openf1.org/v1/laps?session_key={session}", f"laps_{session}.json")
-        stints = list(filter(lambda stint: (stint["lap_end"] - stint["lap_start"]) > 5, stints))
+        stints = [stint for stint in stints if (stint["lap_end"] - stint["lap_start"]) > 5]
 
         # Group laps by driver
         laps_by_driver = defaultdict(dict)
@@ -112,7 +113,7 @@ for COMPOUND in COMPOUNDS:
         groups[key].append(r)
 
     for group in groups.values():
-        lap_times = [r["lap_time"] for r in group]
+        lap_times = np.array([r["lap_time"] for r in group])
         median_time = np.median(lap_times)
         for r in group:
             if r["lap_number"] == r["stint_start"]:
@@ -141,144 +142,92 @@ for COMPOUND in COMPOUNDS:
         })
         detailed.append(newrow)
 
-    # --- Filter anomalies ---
-    lap_times = np.array([r["lap_time"] for r in detailed])
-    ages = np.array([r["tyre_age"] for r in detailed])
-    fuel_zero = np.array([r["fuel_corrected_time_zero"] for r in detailed])
-    ANOMALY_THRESHOLD = min(lap_times) * 1.15
-    mask = (lap_times <= ANOMALY_THRESHOLD) & np.isfinite(lap_times)
-    lap_times_clean = lap_times[mask]
-    ages_clean = ages[mask]
-    fuel_zero_clean = fuel_zero[mask]
+    # --- Sequential anomaly filter ---
+    rows_filtered_seq = []
+    last_mean = None
+    THRESHOLD = 1.03  # Remove if > 1.03 × last accepted lap
 
-    print(f"{COMPOUND}: After filtering lap_time <= {ANOMALY_THRESHOLD:.3f}: {len(lap_times_clean)} rows remain.")
+    sorted_indices = np.argsort([r["tyre_age"] for r in detailed])
+    for idx in sorted_indices:
+        r = detailed[idx]
+        lap_time = r["fuel_corrected_time_zero"]
+        if last_mean is None or lap_time <= THRESHOLD * last_mean:
+            rows_filtered_seq.append(r)
+            last_mean = lap_time
 
-    # --- Calculate mean per tyre age ---
+    detailed = rows_filtered_seq
+
+    # --- Compute mean per tyre age ---
+    ages_clean = np.array([r["tyre_age"] for r in detailed])
+    fuel_zero_clean = np.array([r["fuel_corrected_time_zero"] for r in detailed])
     unique_ages = np.array(sorted(set(ages_clean)))
     mean_times_fuel_zero = np.array([fuel_zero_clean[ages_clean == a].mean() for a in unique_ages])
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
-    from sklearn.linear_model import LinearRegression, RANSACRegressor, HuberRegressor
 
-    # --- Data (replace with your real arrays) ---
-    x = np.array(unique_ages)
-    y = np.array(mean_times_fuel_zero)
+    # --- Mask very low tyre ages ---
+    mask = unique_ages >= 2
+    x = unique_ages[mask]
+    y = mean_times_fuel_zero[mask]
 
-    # Avoid log(0)
+    # --- Avoid log(0) for exponential fits ---
     y_safe = np.clip(y, 1e-6, None)
     log_y = np.log(y_safe)
     X = x.reshape(-1, 1)
 
-    # --- Output directory ---
-    PLOTS_DIR = "plots"
-    os.makedirs(PLOTS_DIR, exist_ok=True)
+    # # --- 1. RANSAC exponential fit ---
+    # ransac = RANSACRegressor(estimator=LinearRegression(), min_samples=0.5,
+    #                          residual_threshold=0.05, random_state=42)
+    # ransac.fit(X, log_y)
+    # b_r = ransac.estimator_.coef_[0]
+    # a_r = np.exp(ransac.estimator_.intercept_)
+    x_plot = np.linspace(x.min(), x.max(), 200)
+    # y_fit_r = a_r * np.exp(b_r * x_plot)
 
-    # -------------------
-    # 1. RANSAC exponential fit
-    # -------------------
-    ransac = RANSACRegressor(estimator=LinearRegression(),
-                            min_samples=0.5, residual_threshold=0.05,
-                            random_state=42)
-    ransac.fit(X, log_y)
+    # # --- 2. Huber exponential fit ---
+    # huber = HuberRegressor()
+    # huber.fit(X, log_y)
+    # b_h = huber.coef_[0]
+    # a_h = np.exp(huber.intercept_)
+    # y_fit_h = a_h * np.exp(b_h * x_plot)
 
-    b_r = ransac.estimator_.coef_[0]
-    a_r = np.exp(ransac.estimator_.intercept_)
-
-    x_fit = np.linspace(x.min(), x.max(), 200)
-    y_fit_r = a_r * np.exp(b_r * x_fit)
-
-    plt.figure(figsize=(10,6))
-    plt.scatter(x, y, s=10, alpha=0.5, label="Fuel-corrected laps")
-    plt.plot(x, y, color="C0", label="Mean per tyre age")
-    plt.plot(x_fit, y_fit_r, "r-", linewidth=2,
-            label=f"RANSAC Exp: y = {a_r:.3f}·e^({b_r:.4f}x)")
-    plt.xlabel("Tyre age (laps)")
-    plt.ylabel("Lap time (s)")
-    plt.title("Exponential Fit with RANSAC")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(PLOTS_DIR, "exp_fit_ransac.png"), dpi=300)
-    plt.close()
-
-    # -------------------
-    # 2. Huber exponential fit
-    # -------------------
-    huber = HuberRegressor()
-    huber.fit(X, log_y)
-
-    b_h = huber.coef_[0]
-    a_h = np.exp(huber.intercept_)
-
-    y_fit_h = a_h * np.exp(b_h * x_fit)
-
-    plt.figure(figsize=(10,6))
-    plt.scatter(x, y, s=10, alpha=0.5, label="Fuel-corrected laps")
-    plt.plot(x, y, color="C0", label="Mean per tyre age")
-    plt.plot(x_fit, y_fit_h, "g--", linewidth=2,
-            label=f"Huber Exp: y = {a_h:.3f}·e^({b_h:.4f}x)")
-    plt.xlabel("Tyre age (laps)")
-    plt.ylabel("Lap time (s)")
-    plt.title("Exponential Fit with HuberRegressor")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(PLOTS_DIR, "exp_fit_huber.png"), dpi=300)
-    plt.close()
-
-    from scipy.optimize import curve_fit
-
-    # -------------------
-    # 3. Offset exponential fit: y = c + a*exp(bx)
-    # -------------------
+    # --- 3. Offset exponential fit ---
     def exp_offset_full(x, a, b, c):
         return c + a * np.exp(b * x)
 
-    # Initial guess (tweak if needed)
     p0 = (1, 0.05, np.min(y))
-
     try:
-        popt, pcov = curve_fit(exp_offset_full, x, y, p0=p0, maxfev=5000)
+        popt, _ = curve_fit(exp_offset_full, x, y, p0=p0, maxfev=5000)
         a_fit, b_fit, c_fit = popt
     except RuntimeError:
-        print("Curve fit failed for y = c + a*exp(bx)")
         a_fit, b_fit, c_fit = np.nan, np.nan, np.nan
 
-    y_fit_offset = exp_offset_full(x_fit, a_fit, b_fit, c_fit)
+    y_fit_offset = exp_offset_full(x_plot, a_fit, b_fit, c_fit)
 
+    # --- Plot per compound ---
     plt.figure(figsize=(10,6))
-    plt.scatter(x, y, s=10, alpha=0.5, label="Fuel-corrected laps")
-    plt.plot(x, y, color="C0", label="Mean per tyre age")
-    plt.plot(x_fit, y_fit_offset, "m-", linewidth=2,
-            label=f"Offset Exp: y = {c_fit:.3f} + {a_fit:.3f}·e^({b_fit:.4f}x)")
+    plt.scatter(x, y, s=10, alpha=0.5, label="Fuel-corrected mean")
+    plt.plot(x_plot, y_fit_offset, "m-", linewidth=2,
+             label=f"Offset Exp: y={c_fit:.3f}+{a_fit:.3f}·exp({b_fit:.4f}x)")
     plt.xlabel("Tyre age (laps)")
     plt.ylabel("Lap time (s)")
-    plt.title(f"Exponential Fit with Offset for {COMPOUND}")
+    plt.title(f"Exponential Fit for {COMPOUND}")
     plt.legend()
     plt.grid(True, alpha=0.3)
-
-    # Save the plot
     plot_fname = os.path.join(PLOTS_DIR, f"exp_fit_offset_{COMPOUND}.png")
     plt.savefig(plot_fname, dpi=300)
     plt.close()
     print(f"Saved offset exponential fit plot for {COMPOUND} to {plot_fname}")
-    # Store for combined plot
+
     combined_fits.append((COMPOUND, (a_fit, b_fit, c_fit)))
 
-
-
-# -------------------
-# Combined offset exponential curves for all compounds
-# -------------------
+# --- Combined plot for all compounds ---
 plt.figure(figsize=(10,6))
-
 colors = {"SOFT": "red", "MEDIUM": "yellow", "HARD": "grey"}
-x_fit = np.linspace(0, 30, 300)  
-
+x_plot = np.linspace(0, 30, 300)
 for compound, params in combined_fits:
     a_fit, b_fit, c_fit = params
-    y_fit = exp_offset_full(x_fit, a_fit, b_fit, c_fit)
-    plt.plot(x_fit, y_fit, color=colors.get(compound, "black"),
-             linewidth=2, label=f"{compound}: y={c_fit:.2f}+{a_fit:.2f}·exp({b_fit:.4f}x)")
+    y_plot = exp_offset_full(x_plot, a_fit, b_fit, c_fit)
+    plt.plot(x_plot, y_plot, color=colors.get(compound, "black"), linewidth=2,
+             label=f"{compound}: y={c_fit:.2f}+{a_fit:.2f}·exp({b_fit:.4f}x)")
 
 plt.xlabel("Tyre age (laps)")
 plt.ylabel("Lap time (s)")
