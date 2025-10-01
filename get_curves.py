@@ -3,6 +3,7 @@ import json
 import requests
 import certifi
 from collections import defaultdict
+import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,7 +35,7 @@ def fetch_and_cache(url, fname):
     return data
 
 # --- User parameters ---
-COUNTRY = "Italy"
+COUNTRY = "Spain"
 YEAR = 2024
 SESSION_TYPE = "Practice"
 COMPOUNDS = ["SOFT", "MEDIUM", "HARD"] 
@@ -44,7 +45,7 @@ SECONDS_SAVED_PER_LAP_FUEL = 0.045
 sessions_url = f"https://api.openf1.org/v1/sessions?country_name={COUNTRY}&session_type={SESSION_TYPE}&year={YEAR}"
 sessions = fetch_and_cache(sessions_url, f"sessions_{COUNTRY}_{SESSION_TYPE}_{YEAR}.json")
 practice_session_keys = [s["session_key"] for s in sessions[:3]]
-print("Practice sessions:", practice_session_keys)
+# print("Practice sessions:", practice_session_keys)
 
 # --- Store data for combined plot ---
 combined_fits = []
@@ -215,7 +216,7 @@ for COMPOUND in COMPOUNDS:
     plot_fname = os.path.join(PLOTS_DIR, f"exp_fit_offset_{COMPOUND}.png")
     plt.savefig(plot_fname, dpi=300)
     plt.close()
-    print(f"Saved offset exponential fit plot for {COMPOUND} to {plot_fname}")
+    # print(f"Saved offset exponential fit plot for {COMPOUND} to {plot_fname}")
 
     combined_fits.append((COMPOUND, (a_fit, b_fit, c_fit)))
 
@@ -237,4 +238,21 @@ plt.legend()
 combined_plot_fname = os.path.join(PLOTS_DIR, "exp_fit_offset_all_compounds.png")
 plt.savefig(combined_plot_fname, dpi=300)
 plt.close()
-print(f"Saved combined offset exponential fit plot to {combined_plot_fname}")
+# print(f"Saved combined offset exponential fit plot to {combined_plot_fname}")
+
+
+
+# --- Output equations as JSON so C# can read them ---
+results = {}
+for compound, (a_fit, b_fit, c_fit) in combined_fits:
+    results[compound] = {
+        "a": float(a_fit),
+        "b": float(b_fit),
+        "c": float(c_fit),
+        "equation": f"y = {c_fit:.3f} + {a_fit:.3f}·exp({b_fit:.4f}x)"
+    }
+
+# Print JSON to stdout
+print(json.dumps(results))
+sys.stdout.flush()
+
